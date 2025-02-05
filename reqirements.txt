@@ -1,0 +1,5 @@
+streamlit==1.32.0
+whisper==1.0.0
+spacy==3.7.4
+python-dotenv==1.0.0
+ru_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/ru_core_news_sm-3.7.0/ru_core_news_sm-3.7.0.tar.gz
