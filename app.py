@@ -4,117 +4,197 @@ import spacy
 import os
 import tempfile
 from spacy import displacy
+from sqlalchemy import create_engine, Column, Integer, String, Boolean
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from passlib.hash import bcrypt
 
-# ---- Настройка моделей ----
+# Инициализация состояния сессии
+if 'user' not in st.session_state:
+    st.session_state.user = None
+if 'audio_data' not in st.session_state:
+    st.session_state.audio_data = None
+if 'transcription' not in st.session_state:
+    st.session_state.transcription = None
+
+# ---- Настройка БД ----
+Base = declarative_base()
+engine = create_engine('sqlite:///users.db')
+Session = sessionmaker(bind=engine)
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    username = Column(String(50), unique=True)
+    hashed_password = Column(String(100))
+    is_admin = Column(Boolean, default=False)
+
+# Создаем таблицы при первом запуске
+Base.metadata.create_all(engine)
+
+# ---- Функции аутентификации ----
+def create_user(username, password, is_admin=False):
+    with Session() as session:
+        if session.query(User).filter_by(username=username).first():
+            return False
+        hashed = bcrypt.hash(password)
+        user = User(username=username, hashed_password=hashed, is_admin=is_admin)
+        session.add(user)
+        session.commit()
+        return True
+
+def verify_user(username, password):
+    with Session() as session:
+        user = session.query(User).filter_by(username=username).first()
+        if user and bcrypt.verify(password, user.hashed_password):
+            return user
+        return None
+
+# ---- Настройка моделей анализа ----
 @st.cache_resource
 def load_models():
     whisper_model = whisper.load_model("medium")
-    nlp = spacy.load("ru_core_news_sm")
+    try:
+        nlp = spacy.load("ru_core_news_sm")
+    except OSError:
+        raise Exception("Модель ru_core_news_sm не установлена. Выполните: python -m spacy download ru_core_news_sm")
     return whisper_model, nlp
 
-# ---- Функции анализа ----
+# ---- Функции анализа текста ----
 def analyze_text(text, nlp):
     doc = nlp(text)
-    results = {
-        "promo_mentioned": False,
-        "was_polite": False,
-        "conflict_detected": False,
-        "expired_products": False,
-        "entities": [],
-        "sentiment": "neutral"
+    return {
+        "promo_mentioned": any(token.text.lower() in ["акция", "скидка", "промо"] for token in doc),
+        "was_polite": any(token.text.lower() in ["спасибо", "пожалуйста"] for token in doc),
+        "entities": [(ent.text, ent.label_) for ent in doc.ents]
     }
 
-    promo_keywords = ["акции", "акция", "скидка", "промо", "специальное предложение"]
-    polite_phrases = ["спасибо", "пожалуйста", "добрый день", "будем рады помочь"]
-    conflict_words = ["оскорбление", "хамство", "претензия", "жалоба"]
-    
-    # Используем актуальный текст из session_state
-    results["promo_mentioned"] = any(token.text.lower() in promo_keywords for token in doc)
-    results["was_polite"] = any(token.text.lower() in polite_phrases for token in doc)
-    results["conflict_detected"] = any(token.text.lower() in conflict_words for token in doc)
-    results["expired_products"] = any("срок годности" in sent.text for sent in doc.sents)
-    results["entities"] = [(ent.text, ent.label_) for ent in doc.ents]
-    
-    if any(word in text.lower() for word in ["прекрасно", "отлично", "доволен"]):
-        results["sentiment"] = "positive"
-    elif any(word in text.lower() for word in ["ужасно", "разочарован", "плохо"]):
-        results["sentiment"] = "negative"
-    
-    return results
-
-def main():
+# ---- Основной интерфейс ----
+def main_app():
     st.title("🕵️ Анализ проверок тайного покупателя")
-    
-    # Инициализация состояния
-    if "raw_text" not in st.session_state:
-        st.session_state.raw_text = ""
-    if "edited_text" not in st.session_state:
-        st.session_state.edited_text = ""
 
-    # Загрузка аудио
-    audio_file = st.file_uploader("Выберите аудиофайл", type=["mp3", "wav"])
+    # ---- Панель аутентификации ----
+    if not st.session_state.user:
+        auth_type = st.radio("Выберите действие:", ["Вход", "Регистрация"])
+        username = st.text_input("Логин")
+        password = st.text_input("Пароль", type="password")
 
-    if audio_file and not st.session_state.raw_text:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-            tmp.write(audio_file.read())
-            audio_path = tmp.name
+        if auth_type == "Регистрация":
+            if st.button("Зарегистрироваться"):
+                if create_user(username, password):
+                    st.success("Регистрация успешна! Теперь войдите")
+                else:
+                    st.error("Пользователь уже существует")
 
-        whisper_model, _ = load_models()
-        with st.spinner("Транскрибируем аудио..."):
-            st.session_state.raw_text = whisper.transcribe(whisper_model, audio_path)["text"]
-            st.session_state.edited_text = st.session_state.raw_text  # Инициализируем edited_text
-        
-        os.unlink(audio_path)
+        if auth_type == "Вход":
+            if st.button("Войти"):
+                user = verify_user(username, password)
+                if user:
+                    st.session_state.user = {
+                        "username": user.username,
+                        "is_admin": user.is_admin
+                    }
+                    st.rerun()
+                else:
+                    st.error("Неверные данные")
 
-    if st.session_state.raw_text:
-        # Редактирование текста с привязкой к session_state
-        st.subheader("✏️ Редактирование транскрипции")
-        st.session_state.edited_text = st.text_area(
-            "Внесите правки:", 
-            value=st.session_state.edited_text,
-            height=250,
-            key="text_editor"  # Уникальный ключ для отслеживания изменений
-        )
+    # ---- Выход ----
+    if st.sidebar.button("Выйти"):
+        st.session_state.clear()  # Очищаем все состояние
+        st.rerun()
 
-        # Кнопка анализа с использованием актуального текста
-        if st.button("Анализировать текст"):
-            _, nlp = load_models()
-            analysis = analyze_text(st.session_state.edited_text, nlp)  # Используем ОТРЕДАКТИРОВАННЫЙ текст
-            
-            # Отображение результатов
-            st.subheader("📊 Результаты анализа")
-            
-            # Метрики
-            cols = st.columns(4)
-            with cols[0]:
-                st.metric("Упомянуты акции", "✅" if analysis["promo_mentioned"] else "❌")
-            with cols[1]:
-                st.metric("Вежливость", "✅" if analysis["was_polite"] else "❌")
-            with cols[2]:
-                st.metric("Конфликты", "⚠️" if analysis["conflict_detected"] else "✅")
-            with cols[3]:
-                st.metric("Тональность", analysis["sentiment"].capitalize())
+    # ---- Основной функционал ----
+    if st.session_state.user:
+        st.sidebar.subheader(f"Вы вошли как: {st.session_state.user['username']}")
 
-            # Сущности
-            st.subheader("🔍 Обнаруженные сущности")
-            if analysis["entities"]:
-                for entity, label in analysis["entities"]:
-                    st.markdown(f"- `{entity}` ({label})")
+        if st.session_state.user.get('is_admin'):
+            admin_interface()
+        else:
+            user_interface()
+
+# ---- Интерфейс администратора ----
+def admin_interface():
+    st.subheader("Панель администратора")
+
+    # Создание пользователей
+    with st.expander("Создать администратора"):
+        new_user = st.text_input("Логин")
+        new_pass = st.text_input("Пароль", type="password")
+        if st.button("Создать админа"):
+            if create_user(new_user, new_pass, is_admin=True):
+                st.success("Админ создан")
             else:
-                st.info("Сущности не обнаружены")
+                st.error("Ошибка создания")
 
-            # Детальный отчет
-            st.subheader("📄 Проблемные места")
-            if analysis["expired_products"]:
-                st.error("**Обнаружено:** Упоминание просроченных товаров")
-            if analysis["conflict_detected"]:
-                st.error("**Обнаружено:** Признаки конфликта")
+    audio_file = st.file_uploader("Загрузите аудиофайл", type=["mp3", "wav"])
 
-            # Визуализация
-            with st.expander("Синтаксический анализ"):
-                doc = nlp(st.session_state.edited_text)
-                html = displacy.render(doc, style="dep", page=True)
-                st.components.v1.html(html, width=800, height=400, scrolling=True)
+    if audio_file:
+        process_audio(audio_file)
+
+        if st.session_state.transcription:
+            st.subheader("Транскрипция:")
+            edited_text = st.text_area("Редактирование",
+                                       st.session_state.transcription,
+                                       height=200,
+                                       key="edited_text")
+
+            if st.button("Анализировать"):
+                analysis = analyze_text(edited_text, load_models()[1])
+
+                st.subheader("Результаты анализа:")
+                st.write(f"Упомянуты акции: {'✅' if analysis['promo_mentioned'] else '❌'}")
+                st.write(f"Вежливый тон: {'✅' if analysis['was_polite'] else '❌'}")
+
+                if analysis['entities']:
+                    st.write("Обнаруженные сущности:")
+                    for entity, label in analysis['entities']:
+                        st.write(f"- {entity} ({label})")
+
+# ---- Интерфейс пользователя ----
+def user_interface():
+    st.subheader("Рабочая панель")
+    audio_file = st.file_uploader("Загрузите аудиофайл", type=["mp3", "wav"])
+
+    if audio_file:
+        process_audio(audio_file)
+
+        if st.session_state.transcription:
+            st.subheader("Транскрипция:")
+            edited_text = st.text_area("Редактирование",
+                                       st.session_state.transcription,
+                                       height=200,
+                                       key="edited_text")
+
+            if st.button("Анализировать"):
+                analysis = analyze_text(edited_text, load_models()[1])
+
+                st.subheader("Результаты анализа:")
+                st.write(f"Упомянуты акции: {'✅' if analysis['promo_mentioned'] else '❌'}")
+                st.write(f"Вежливый тон: {'✅' if analysis['was_polite'] else '❌'}")
+
+                if analysis['entities']:
+                    st.write("Обнаруженные сущности:")
+                    for entity, label in analysis['entities']:
+                        st.write(f"- {entity} ({label})")
+
+# ---- Обработка аудио ----
+def process_audio(audio_file):
+    # Если аудио уже обработано, не делаем транскрипцию снова
+    if st.session_state.audio_data == audio_file.getvalue():
+        return
+
+    st.session_state.audio_data = audio_file.getvalue()
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+        tmp.write(audio_file.read())
+        audio_path = tmp.name
+
+    whisper_model, nlp = load_models()
+
+    with st.spinner("Обработка аудио..."):
+        st.session_state.transcription = whisper_model.transcribe(audio_path)["text"]
+
+    os.unlink(audio_path)
 
 if __name__ == "__main__":
-    main()
+    main_app()
