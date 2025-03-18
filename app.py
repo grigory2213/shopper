@@ -130,25 +130,43 @@ def admin_interface():
 
     if audio_file:
         process_audio(audio_file)
-
+        
         if st.session_state.transcription:
-            st.subheader("Транскрипция:")
-            edited_text = st.text_area("Редактирование",
-                                       st.session_state.transcription,
-                                       height=200,
-                                       key="edited_text")
-
-            if st.button("Анализировать"):
-                analysis = analyze_text(edited_text, load_models()[1])
-
-                st.subheader("Результаты анализа:")
-                st.write(f"Упомянуты акции: {'✅' if analysis['promo_mentioned'] else '❌'}")
-                st.write(f"Вежливый тон: {'✅' if analysis['was_polite'] else '❌'}")
-
-                if analysis['entities']:
-                    st.write("Обнаруженные сущности:")
-                    for entity, label in analysis['entities']:
-                        st.write(f"- {entity} ({label})")
+            # Шаг 1: Улучшение текста
+            if st.button("Улучшить текст"):
+                with st.spinner("Улучшаем текст с помощью GPT..."):
+                    st.session_state.improved_text = improve_text(st.session_state.transcription)
+            
+            if 'improved_text' in st.session_state:
+                st.subheader("Улучшенный текст")
+                edited_text = st.text_area("Редактирование", 
+                                         st.session_state.improved_text, 
+                                         height=200,
+                                         key="edited_text")
+                
+                # Шаг 2: Анализ
+                if st.button("Анализировать текст"):
+                    with st.spinner("Анализируем текст..."):
+                        analysis = analyze_text_with_gpt(edited_text)
+                        st.session_state.analysis = analysis
+                        
+                        # Сохранение в Excel
+                        save_to_excel(analysis, "analysis.xlsx")
+                        st.success("Анализ завершен!")
+                        
+                        # Скачивание файла
+                        with open("analysis.xlsx", "rb") as f:
+                            st.download_button(
+                                label="Скачать анализ",
+                                data=f,
+                                file_name="analysis.xlsx",
+                                mime="application/vnd.ms-excel"
+                            )
+            
+            # Отображение результатов
+            if 'analysis' in st.session_state:
+                st.subheader("Результаты анализа")
+                st.json(st.session_state.analysis)
 
 # ---- Интерфейс пользователя ----
 def user_interface():
